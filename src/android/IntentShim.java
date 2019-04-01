@@ -10,11 +10,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Parcelable;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.support.v4.app.ActivityCompat;
@@ -38,8 +40,10 @@ import java.io.File;
 import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 
 import static android.os.Environment.getExternalStorageDirectory;
@@ -70,16 +74,70 @@ public class IntentShim extends CordovaPlugin {
             }
 
             JSONObject obj = args.getJSONObject(0);
-            Intent intent = populateIntent(obj, callbackContext);
             int requestCode = obj.has("requestCode") ? obj.getInt("requestCode") : 1;
 
             boolean bExpectResult = false;
             if (action.equals("startActivityForResult"))
             {
+                Intent intent = populateIntent(obj, callbackContext);
+
                 bExpectResult = true;
                 this.onActivityResultCallbackContext = callbackContext;
+                startActivity(intent, bExpectResult, requestCode, callbackContext);
+
+            } else {
+
+                Uri uri = null;
+                final CordovaResourceApi resourceApi = webView.getResourceApi();
+                if (obj.has("url"))
+                {
+                    String uriAsString = obj.getString("url");
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && uriAsString.startsWith("file://"))
+                    {
+                        uri = remapUriWithFileProvider(uriAsString, callbackContext);
+                    }
+                    else
+                    {
+                        uri = resourceApi.remapUri(Uri.parse(obj.getString("url")));
+                    }
+                }
+                Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+                int flag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PackageManager.MATCH_ALL : PackageManager.MATCH_DEFAULT_ONLY;
+                List<ResolveInfo> launchers = this.cordova.getActivity().getApplicationContext().getPackageManager().queryIntentActivities(intent, flag);
+
+                // 自アプリを起動対象から除外する
+                List<Intent> intents = new ArrayList<>();
+                for (ResolveInfo app : launchers) {
+                    if (this.cordova.getActivity().getApplicationContext().getPackageName().equals(app.activityInfo.packageName)) {
+                        continue;
+                    }
+                    // 標準ブラウザは対象外にする
+                    if (app.activityInfo.packageName.equals("com.android.browser")) {
+                        continue;
+                    }
+                    Intent target = new Intent(intent);
+                    target.setPackage(app.activityInfo.packageName);
+                    intents.add(target);
+                }
+
+                if (intents.isEmpty()) {
+                    // 起動対象のアプリが見つからなかった
+                    startActivity(intent, false, requestCode, callbackContext);
+                    return true;
+                } else {
+                    // createChooserの第一引数のIntentに反応できるアプリが存在しない場合は EXTRA_INITIAL_INTENTS
+                    // の指定が無視されるため, 必ず反応できるIntentを設定する目的でremove(0)を指定する.
+                    String title = "";
+                    if (obj.has("chooser")) {
+                        title = obj.getString("chooser");
+                    }
+                    Intent chooser = Intent.createChooser(intents.remove(0), title);
+                    chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, intents.toArray(new Parcelable[0]));
+                    ((CordovaActivity)this.cordova.getActivity()).startActivity(chooser);
+                    callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.OK));
+
+                }
             }
-            startActivity(intent, bExpectResult, requestCode, callbackContext);
 
             return true;
         }
